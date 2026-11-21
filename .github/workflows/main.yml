@@ -54,6 +54,16 @@ jobs:
         Invoke-WebRequest -Uri $url -OutFile "bore.zip"
         Expand-Archive -Path "bore.zip" -DestinationPath "." -Force
 
+        function Get-BoreDirectIp {
+            param([string]$Address)
+            $port = ($Address -split ":")[1]
+            try {
+                $boreIp = ([System.Net.Dns]::GetHostAddresses("bore.pub") | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1).IPAddressToString
+                if ($boreIp -and $port) { return "${boreIp}:${port}" }
+            } catch {}
+            return $Address
+        }
+
         function Start-BoreTunnel {
             Remove-Item "bore_out.log","bore_err.log" -ErrorAction SilentlyContinue
             $proc = Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput "bore_out.log" -RedirectStandardError "bore_err.log" -NoNewWindow -PassThru
@@ -68,7 +78,8 @@ jobs:
                     break
                 }
             }
-            return @{ Process = $proc; Address = $addr }
+            $directIp = if ($addr) { Get-BoreDirectIp $addr } else { $null }
+            return @{ Process = $proc; Address = $addr; DirectIp = $directIp }
         }
 
         $tunnel = Start-BoreTunnel
@@ -83,6 +94,7 @@ jobs:
         Write-Host "🎉 LOW-LATENCY WINDOWS RDP IS READY!" -ForegroundColor Green
         Write-Host "==================================================================" -ForegroundColor Cyan
         Write-Host "🌐 RDP Address : $($tunnel.Address)" -ForegroundColor Yellow
+        Write-Host "🔢 Direct IP   : $($tunnel.DirectIp)" -ForegroundColor Yellow
         Write-Host "👤 Username    : runneradmin" -ForegroundColor White
         Write-Host "🔑 Password    : Your RDP_PASSWORD GitHub Secret" -ForegroundColor White
         Write-Host "⏱️  Max Runtime : Up to 6 Hours" -ForegroundColor Magenta
@@ -96,10 +108,10 @@ jobs:
             if ($tunnel.Process.HasExited) {
                 Write-Host "⚠️ Bore tunnel disconnected. Restarting..." -ForegroundColor Yellow
                 $tunnel = Start-BoreTunnel
-                Write-Host "🔄 New RDP Address: $($tunnel.Address)" -ForegroundColor Yellow
+                Write-Host "🔄 New RDP Address : $($tunnel.Address)" -ForegroundColor Yellow
+                Write-Host "🔄 New Direct IP   : $($tunnel.DirectIp)" -ForegroundColor Yellow
             }
             if ($i % 10 -eq 0) {
-                Write-Host "🟢 Active: $i / $totalMinutes min | Address: $($tunnel.Address)"
+                Write-Host "🟢 Active: $i / $totalMinutes min | Direct IP: $($tunnel.DirectIp) | Host: $($tunnel.Address)"
             }
         }
-        
