@@ -1,0 +1,105 @@
+name: 🚀 One-Click Low-Latency Windows RDP (Bore)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: ⚙️ Enable RDP, Security & Low-Latency Tweaks
+      env:
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      run: |
+        if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            Write-Error "RDP_PASSWORD secret is missing. Add it in Repo Settings > Secrets and variables > Actions."
+            exit 1
+        }
+
+        # Enable RDP with Network Level Authentication kept ON for security
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+        # Set strong password from GitHub Secret
+        $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+        Set-LocalUser -Name "runneradmin" -Password $securePass
+        net localgroup "Remote Desktop Users" runneradmin /add >$null 2>&1
+
+        # Enable AVC/H.264 RemoteFX Encoding & High Compression
+        New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Force | Out-Null
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -name "bEnumerateHWBeforeSW" -Value 1 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -name "AVC444ModePreferred" -Value 1 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -name "MaxCompressionLevel" -Value 3 -Type DWord
+
+        # Disable Nagle's Algorithm for faster mouse & keyboard response
+        $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+        foreach ($interface in $interfaces) {
+            Set-ItemProperty -Path $interface.PSPath -name "TcpAckFrequency" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $interface.PSPath -name "TCPNoDelay" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+        }
+
+    - name: ⚡ Start Bore Tunnel & 6-Hour Keep-Alive
+      run: |
+        # Download latest Bore Windows binary with v0.6.0 fallback
+        $url = "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip"
+        try {
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ekzhang/bore/releases/latest" -Headers @{"User-Agent"="GitHubActions"}
+            $asset = $release.assets | Where-Object { $_.name -like "*x86_64-pc-windows-msvc.zip" } | Select-Object -First 1
+            if ($asset) { $url = $asset.browser_download_url }
+        } catch {}
+
+        Invoke-WebRequest -Uri $url -OutFile "bore.zip"
+        Expand-Archive -Path "bore.zip" -DestinationPath "." -Force
+
+        function Start-BoreTunnel {
+            Remove-Item "bore_out.log","bore_err.log" -ErrorAction SilentlyContinue
+            $proc = Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -RedirectStandardOutput "bore_out.log" -RedirectStandardError "bore_err.log" -NoNewWindow -PassThru
+            $addr = $null
+            for ($w = 1; $w -le 15; $w++) {
+                Start-Sleep -Seconds 1
+                $logs = ""
+                if (Test-Path "bore_out.log") { $logs += (Get-Content "bore_out.log" -Raw) }
+                if (Test-Path "bore_err.log") { $logs += (Get-Content "bore_err.log" -Raw) }
+                if ($logs -match "bore\.pub:\d+") {
+                    $addr = $matches[0]
+                    break
+                }
+            }
+            return @{ Process = $proc; Address = $addr }
+        }
+
+        $tunnel = Start-BoreTunnel
+        if (-not $tunnel.Address) {
+            Write-Error "Failed to get a bore.pub address. Check logs below:"
+            Get-Content "bore_out.log","bore_err.log" -ErrorAction SilentlyContinue
+            exit 1
+        }
+
+        Write-Host ""
+        Write-Host "==================================================================" -ForegroundColor Cyan
+        Write-Host "🎉 LOW-LATENCY WINDOWS RDP IS READY!" -ForegroundColor Green
+        Write-Host "==================================================================" -ForegroundColor Cyan
+        Write-Host "🌐 RDP Address : $($tunnel.Address)" -ForegroundColor Yellow
+        Write-Host "👤 Username    : runneradmin" -ForegroundColor White
+        Write-Host "🔑 Password    : Your RDP_PASSWORD GitHub Secret" -ForegroundColor White
+        Write-Host "⏱️  Max Runtime : Up to 6 Hours" -ForegroundColor Magenta
+        Write-Host "==================================================================" -ForegroundColor Cyan
+        Write-Host ""
+
+        # Keep-Alive loop up to 350 minutes with auto-restart if Bore drops
+        $totalMinutes = 350
+        for ($i = 1; $i -le $totalMinutes; $i++) {
+            Start-Sleep -Seconds 60
+            if ($tunnel.Process.HasExited) {
+                Write-Host "⚠️ Bore tunnel disconnected. Restarting..." -ForegroundColor Yellow
+                $tunnel = Start-BoreTunnel
+                Write-Host "🔄 New RDP Address: $($tunnel.Address)" -ForegroundColor Yellow
+            }
+            if ($i % 10 -eq 0) {
+                Write-Host "🟢 Active: $i / $totalMinutes min | Address: $($tunnel.Address)"
+            }
+        }
+        
